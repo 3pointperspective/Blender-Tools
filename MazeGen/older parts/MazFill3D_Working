@@ -1,0 +1,183 @@
+bl_info = {
+    "name": "3D Maze Filler",
+    "blender": (4, 1, 0),
+    "category": "Object",
+    "author": "Aidan Ault",
+    "version": (2, 1),
+    "description": "Fills a selected object's volume with a 3D maze structure."
+}
+
+import bpy
+import bmesh
+import mathutils
+from bpy.types import Operator, Panel, PropertyGroup
+from bpy.props import PointerProperty, IntProperty
+from mathutils.bvhtree import BVHTree
+import random
+
+# ------------------------- Properties -------------------------
+
+class MazeFillProperties(PropertyGroup):
+    target_object: PointerProperty(
+        name="Target Mesh",
+        type=bpy.types.Object,
+        description="Select the mesh object to fill with maze",
+    )
+    resolution: IntProperty(
+        name="Resolution (Paths per Axis)",
+        default=10,
+        min=3,
+        description="Number of maze paths along shortest axis"
+    )
+
+# --------------------- Manifold Check ------------------------
+
+def is_mesh_manifold(obj):
+    mesh = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    is_manifold = all(e.is_manifold for e in bm.edges)
+    bm.free()
+    return is_manifold
+
+# ---------------------- Maze Generation ----------------------
+
+def point_inside_object(obj, point):
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_obj = obj.evaluated_get(depsgraph)
+    mesh = eval_obj.to_mesh()
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bvh = BVHTree.FromBMesh(bm)
+    bm.free()
+
+    count = 0
+    direction = mathutils.Vector((1, 0.123, 0.456))
+    loc, normal, index, dist = bvh.ray_cast(point, direction)
+    while index is not None:
+        count += 1
+        point = loc + direction * 0.0001
+        loc, normal, index, dist = bvh.ray_cast(point, direction)
+    eval_obj.to_mesh_clear()
+    return count % 2 == 1
+
+def generate_maze_cells(valid_cells):
+    maze = set()
+    visited = set()
+
+    def cell_neighbors(cell):
+        x, y, z = cell
+        for dx, dy, dz in [(-2, 0, 0), (2, 0, 0), (0, -2, 0), (0, 2, 0), (0, 0, -2), (0, 0, 2)]:
+            neighbor = (x + dx, y + dy, z + dz)
+            if neighbor in valid_cells:
+                yield neighbor, (dx // 2, dy // 2, dz // 2)
+
+    start = random.choice(list(valid_cells))
+    stack = [start]
+    visited.add(start)
+    maze.add(start)
+
+    while stack:
+        current = stack[-1]
+        neighbors = [n for n, _ in cell_neighbors(current) if n not in visited]
+        if neighbors:
+            chosen = random.choice(neighbors)
+            path = tuple((c + p) for c, p in zip(current, [(a - b) // 2 for a, b in zip(chosen, current)]))
+            maze.add(chosen)
+            maze.add(path)
+            visited.add(chosen)
+            stack.append(chosen)
+        else:
+            stack.pop()
+
+    return maze
+
+def build_maze_mesh(maze_cells, spacing, origin):
+    mesh = bpy.data.meshes.new("MazeMesh")
+    obj = bpy.data.objects.new("Maze", mesh)
+    bpy.context.collection.objects.link(obj)
+
+    bm = bmesh.new()
+    for x, y, z in maze_cells:
+        cube = bmesh.ops.create_cube(bm, size=spacing)
+        bmesh.ops.translate(bm, verts=cube['verts'], vec=origin + mathutils.Vector((x * spacing, y * spacing, z * spacing)))
+    bm.to_mesh(mesh)
+    bm.free()
+
+# ---------------------- Operator ----------------------
+
+class OBJECT_OT_generate_filled_maze(Operator):
+    bl_idname = "object.generate_filled_maze"
+    bl_label = "Generate Filled Maze"
+    bl_description = "Generate a 3D maze structure inside the selected object's volume"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.maze_fill_props
+        target_obj = props.target_object
+        resolution = props.resolution
+
+        if not target_obj or target_obj.type != 'MESH':
+            self.report({'ERROR'}, "Please select a mesh object")
+            return {'CANCELLED'}
+
+        if not is_mesh_manifold(target_obj):
+            self.report({'ERROR'}, "Object mesh is not manifold!")
+            return {'CANCELLED'}
+
+        bbox = [target_obj.matrix_world @ mathutils.Vector(corner) for corner in target_obj.bound_box]
+        min_bound = mathutils.Vector((min(v[i] for v in bbox) for i in range(3)))
+        max_bound = mathutils.Vector((max(v[i] for v in bbox) for i in range(3)))
+        dimensions = max_bound - min_bound
+
+        spacing = min(dimensions) / (resolution * 2 + 1)
+        grid_size = [int((d / spacing)) | 1 for d in dimensions]
+
+        valid_cells = set()
+        for x in range(0, grid_size[0], 2):
+            for y in range(0, grid_size[1], 2):
+                for z in range(0, grid_size[2], 2):
+                    world_pos = min_bound + mathutils.Vector((x * spacing, y * spacing, z * spacing))
+                    if point_inside_object(target_obj, world_pos):
+                        valid_cells.add((x, y, z))
+
+        maze_cells = generate_maze_cells(valid_cells)
+        build_maze_mesh(maze_cells, spacing, min_bound)
+
+        return {'FINISHED'}
+
+# ---------------------- UI ----------------------
+
+class VIEW3D_PT_maze_fill_panel(Panel):
+    bl_label = "3D Maze Filler"
+    bl_idname = "VIEW3D_PT_maze_fill_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Maze'
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.maze_fill_props
+        layout.prop(props, "target_object")
+        layout.prop(props, "resolution")
+        layout.operator("object.generate_filled_maze")
+
+# ---------------------- Register ----------------------
+
+def register():
+    bpy.utils.register_class(MazeFillProperties)
+    bpy.types.Scene.maze_fill_props = PointerProperty(type=MazeFillProperties)
+    bpy.utils.register_class(OBJECT_OT_generate_filled_maze)
+    bpy.utils.register_class(VIEW3D_PT_maze_fill_panel)
+
+def unregister():
+    bpy.utils.unregister_class(MazeFillProperties)
+    del bpy.types.Scene.maze_fill_props
+    bpy.utils.unregister_class(OBJECT_OT_generate_filled_maze)
+    bpy.utils.unregister_class(VIEW3D_PT_maze_fill_panel)
+
+if __name__ == "__main__":
+    register()

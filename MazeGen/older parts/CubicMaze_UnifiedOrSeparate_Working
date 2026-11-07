@@ -1,0 +1,217 @@
+bl_info = {
+    "name": "MazGen3D",
+    "author": "Aidan Ault",
+    "version": (1, 1),
+    "blender": (4, 1, 0),
+    "location": "View3D > Sidebar > MazGen3D",
+    "description": "Generate a 3D maze, using Recursive Backtracking",
+    "category": "Add Mesh",
+}
+
+import bpy
+import bmesh
+import random
+import mathutils  # ✅ Fixed: import added for Vector math
+from bpy.props import IntProperty, BoolProperty
+from bpy.types import Operator, Panel, PropertyGroup
+
+CUBE_SIZE = 0.1
+
+# ----------------------- Properties -----------------------
+
+class MazeProperties(PropertyGroup):
+    maze_x: IntProperty(name="Width (X)", default=5, min=1)
+    maze_y: IntProperty(name="Depth (Y)", default=5, min=1)
+    maze_z: IntProperty(name="Height (Z)", default=5, min=1)
+    use_unified_form: BoolProperty(name="Unified Mesh", default=False, description="Join all cubes into a single manifold mesh")
+
+# ---------------------- Maze Logic ------------------------
+
+def generate_maze_array(width, depth, height):
+    grid_x = width * 2 - 1
+    grid_y = depth * 2 - 1
+    grid_z = height * 2 - 1
+
+    maze = [[[0 for _ in range(grid_z)] for _ in range(grid_y)] for _ in range(grid_x)]
+
+    visited = set()
+    stack = []
+
+    start = (random.randrange(0, grid_x, 2), random.randrange(0, grid_y, 2), random.randrange(0, grid_z, 2))
+    stack.append(start)
+    visited.add(start)
+    maze[start[0]][start[1]][start[2]] = 1
+
+    directions = [(2, 0, 0), (-2, 0, 0), (0, 2, 0), (0, -2, 0), (0, 0, 2), (0, 0, -2)]
+
+    while stack:
+        cx, cy, cz = stack[-1]
+        neighbors = []
+        for dx, dy, dz in directions:
+            nx, ny, nz = cx + dx, cy + dy, cz + dz
+            if 0 <= nx < grid_x and 0 <= ny < grid_y and 0 <= nz < grid_z and (nx, ny, nz) not in visited:
+                neighbors.append((nx, ny, nz))
+
+        if neighbors:
+            next_cell = random.choice(neighbors)
+            nx, ny, nz = next_cell
+            wall_x, wall_y, wall_z = (cx + nx) // 2, (cy + ny) // 2, (cz + nz) // 2
+            maze[nx][ny][nz] = 1
+            maze[wall_x][wall_y][wall_z] = 1
+            visited.add(next_cell)
+            stack.append(next_cell)
+        else:
+            stack.pop()
+
+    return maze
+
+# -------------------- Separate Cube Mesh --------------------
+
+def create_maze_mesh(maze):
+    mesh = bpy.data.meshes.new("Maze")
+    obj = bpy.data.objects.new("Maze", mesh)
+    bpy.context.collection.objects.link(obj)
+
+    verts = []
+    faces = []
+    offset = 0
+
+    for x, layer in enumerate(maze):
+        for y, row in enumerate(layer):
+            for z, val in enumerate(row):
+                if val == 1:
+                    ox, oy, oz = x * CUBE_SIZE, y * CUBE_SIZE, z * CUBE_SIZE
+                    cube_verts = [
+                        (ox - CUBE_SIZE/2, oy - CUBE_SIZE/2, oz - CUBE_SIZE/2),
+                        (ox + CUBE_SIZE/2, oy - CUBE_SIZE/2, oz - CUBE_SIZE/2),
+                        (ox + CUBE_SIZE/2, oy + CUBE_SIZE/2, oz - CUBE_SIZE/2),
+                        (ox - CUBE_SIZE/2, oy + CUBE_SIZE/2, oz - CUBE_SIZE/2),
+                        (ox - CUBE_SIZE/2, oy - CUBE_SIZE/2, oz + CUBE_SIZE/2),
+                        (ox + CUBE_SIZE/2, oy - CUBE_SIZE/2, oz + CUBE_SIZE/2),
+                        (ox + CUBE_SIZE/2, oy + CUBE_SIZE/2, oz + CUBE_SIZE/2),
+                        (ox - CUBE_SIZE/2, oy + CUBE_SIZE/2, oz + CUBE_SIZE/2),
+                    ]
+                    cube_faces = [
+                        (0, 1, 2, 3), (4, 5, 6, 7),
+                        (0, 1, 5, 4), (2, 3, 7, 6),
+                        (1, 2, 6, 5), (0, 3, 7, 4),
+                    ]
+                    verts.extend(cube_verts)
+                    faces.extend([(a+offset, b+offset, c+offset, d+offset) for a,b,c,d in cube_faces])
+                    offset += 8
+
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return obj
+
+# -------------------- Unified Mesh Builder --------------------
+
+def create_unified_maze_mesh(maze):
+    mesh = bpy.data.meshes.new("MazeUnified")
+    obj = bpy.data.objects.new("MazeUnified", mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new()
+
+    half = CUBE_SIZE / 2.0
+    face_dirs = {
+        (1, 0, 0): [(half, -half, -half), (half, -half, half), (half, half, half), (half, half, -half)],
+        (-1, 0, 0): [(-half, -half, -half), (-half, half, -half), (-half, half, half), (-half, -half, half)],
+        (0, 1, 0): [(-half, half, -half), (half, half, -half), (half, half, half), (-half, half, half)],
+        (0, -1, 0): [(-half, -half, -half), (-half, -half, half), (half, -half, half), (half, -half, -half)],
+        (0, 0, 1): [(-half, -half, half), (-half, half, half), (half, half, half), (half, -half, half)],
+        (0, 0, -1): [(-half, -half, -half), (half, -half, -half), (half, half, -half), (-half, half, -half)],
+    }
+
+    vert_cache = {}
+
+    def get_vert_key(pos):
+        return (round(pos.x, 5), round(pos.y, 5), round(pos.z, 5))
+
+    def get_or_create_vert(pos):
+        key = get_vert_key(pos)
+        if key not in vert_cache:
+            vert_cache[key] = bm.verts.new(pos)
+        return vert_cache[key]
+
+    sx, sy, sz = len(maze), len(maze[0]), len(maze[0][0])
+
+    for x in range(sx):
+        for y in range(sy):
+            for z in range(sz):
+                if maze[x][y][z] != 1:
+                    continue
+                cx, cy, cz = x * CUBE_SIZE, y * CUBE_SIZE, z * CUBE_SIZE
+                center = mathutils.Vector((cx, cy, cz))
+                for dx, dy, dz in face_dirs:
+                    nx, ny, nz = x + dx, y + dy, z + dz
+                    if not (0 <= nx < sx and 0 <= ny < sy and 0 <= nz < sz) or maze[nx][ny][nz] != 1:
+                        face_verts = []
+                        for offset in face_dirs[(dx, dy, dz)]:
+                            world_pos = center + mathutils.Vector(offset)
+                            face_verts.append(get_or_create_vert(world_pos))
+                        try:
+                            bm.faces.new(face_verts)
+                        except ValueError:
+                            pass
+
+    bm.normal_update()
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.00001)
+    bm.to_mesh(mesh)
+    bm.free()
+    return obj
+
+# ------------------------ Operator ------------------------
+
+class Generate3DMazeOperator(Operator):
+    bl_idname = "mesh.generate_3d_maze"
+    bl_label = "Generate 3D Maze"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.maze_props
+        maze = generate_maze_array(props.maze_x, props.maze_y, props.maze_z)
+        if props.use_unified_form:
+            create_unified_maze_mesh(maze)
+        else:
+            create_maze_mesh(maze)
+        return {'FINISHED'}
+
+# -------------------------- UI --------------------------
+
+class MazeGeneratorPanel(Panel):
+    bl_label = "3D Maze Generator"
+    bl_idname = "VIEW3D_PT_3d_maze_generator"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "3D Maze Generator"
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.maze_props
+
+        layout.prop(props, "maze_x")
+        layout.prop(props, "maze_y")
+        layout.prop(props, "maze_z")
+        layout.prop(props, "use_unified_form")
+        layout.operator("mesh.generate_3d_maze")
+
+# ----------------------- Register -----------------------
+
+classes = (
+    MazeProperties,
+    Generate3DMazeOperator,
+    MazeGeneratorPanel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.maze_props = bpy.props.PointerProperty(type=MazeProperties)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.maze_props
+
+if __name__ == "__main__":
+    register()

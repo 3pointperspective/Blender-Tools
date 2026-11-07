@@ -1,0 +1,23 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.10.34928.147
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{888888A0-9F3D-457C-B088-3A5042F75D52}") = "MP4 Exporter Tool", "MP4 Exporter Tool\MP4 Exporter Tool.pyproj", "{C3E0B1B2-45F9-43CC-B751-F75C1AE40BC7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C3E0B1B2-45F9-43CC-B751-F75C1AE40BC7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C3E0B1B2-45F9-43CC-B751-F75C1AE40BC7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E4F6E8CD-5EC1-476A-994A-9F5F21ED58F3}
+	EndGlobalSection
+EndGlobal
